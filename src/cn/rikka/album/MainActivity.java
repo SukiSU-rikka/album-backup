@@ -3,7 +3,9 @@ package cn.rikka.album;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -20,7 +22,6 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.File;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.util.ArrayList;
@@ -30,9 +31,10 @@ import java.util.Map;
 
 public class MainActivity extends Activity {
 
-    private TextView statsView, statusView, urlView, logView;
+    private TextView statsView, statusView, urlView, logView, locationView;
     private ProgressBar progressBar;
     private Button backupBtn, restoreBtn, transferBtn, cancelBtn;
+    private static final int REQ_TREE = 9;
     private HttpTransferServer server;
     private final Handler handler = new Handler();
     private int lastLogCount = -1;
@@ -75,6 +77,31 @@ public class MainActivity extends Activity {
         statsView.setTextSize(15);
         statsView.setPadding(0, 8, 0, 8);
         root.addView(statsView);
+
+        locationView = new TextView(this);
+        locationView.setTextSize(13);
+        locationView.setTextColor(Color.rgb(90, 90, 90));
+        locationView.setPadding(0, 0, 0, 4);
+        root.addView(locationView);
+
+        Button pickBtn = bigButton("选择备份文件夹");
+        pickBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { pickFolder(); }
+        });
+        root.addView(pickBtn);
+
+        Button defaultBtn = new Button(this);
+        defaultBtn.setText("恢复默认备份位置");
+        defaultBtn.setTextSize(14);
+        defaultBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                SharedPreferences sp = getSharedPreferences(BackupStore.PREFS, MODE_PRIVATE);
+                sp.edit().remove(BackupStore.KEY_TREE).apply();
+                refreshStats();
+                statusView.setText("已恢复默认备份位置");
+            }
+        });
+        root.addView(defaultBtn);
 
         backupBtn = bigButton("立即备份到本地");
         backupBtn.setOnClickListener(new View.OnClickListener() {
@@ -166,6 +193,35 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int req, String[] perms, int[] grants) {
         refreshStats();
+    }
+
+    // ---------------- 备份文件夹选择 ----------------
+
+    private void pickFolder() {
+        if (WorkerService.running) {
+            statusView.setText("有任务正在运行，先等它完成或取消再换文件夹");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(i, REQ_TREE);
+    }
+
+    @Override protected void onActivityResult(int req, int result, Intent data) {
+        super.onActivityResult(req, result, data);
+        if (req != REQ_TREE || result != RESULT_OK || data == null) return;
+        Uri uri = data.getData();
+        if (uri == null) return;
+        int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try { getContentResolver().takePersistableUriPermission(uri, flags); }
+        catch (Exception e) { statusView.setText("文件夹授权失败：" + e.getMessage()); return; }
+        SharedPreferences sp = getSharedPreferences(BackupStore.PREFS, MODE_PRIVATE);
+        sp.edit().putString(BackupStore.KEY_TREE, uri.toString()).apply();
+        lastLogCount = -1;
+        refreshStats();
+        statusView.setText("备份文件夹已切换。注意：统计和恢复都以新文件夹里的备份为准");
     }
 
     // ---------------- 操作 ----------------
@@ -261,15 +317,31 @@ public class MainActivity extends Activity {
     private String lastSummaryShown = "";
 
     private void refreshStats() {
+        if (locationView != null) {
+            BackupStore store = BackupStore.open(this);
+            locationView.setText("备份位置：" + store.describe() + (store.isSaf() ? "（自选文件夹）" : "（默认）"));
+        }
         if (!hasMediaPermission()) {
             statsView.setText("尚未授予照片权限，点任意按钮会弹出授权");
             return;
         }
-        final Map<String, JSONObject> map = Engine.loadManifestMap(Engine.backupRoot(this));
+        final Map<String, JSONObject> map = Engine.loadManifestMap(this);
         long backedBytes = 0;
         for (JSONObject o : map.values()) backedBytes += o.optLong("size");
         final int backed = map.size();
         final long bb = backedBytes;
+        final String hist;
+        String h = "";
+        try {
+            JSONArray recs = Engine.readHistory(this);
+            if (recs.length() > 0) {
+                JSONObject last = recs.getJSONObject(recs.length() - 1);
+                h = "\n最近一次" + (last.optString("type").equals("backup") ? "备份" : "恢复")
+                        + "：" + Engine.fmtTime(last.optLong("time"))
+                        + "（成功 " + last.optInt("added") + "，跳过 " + last.optInt("skipped") + "，失败 " + last.optInt("failed") + "）";
+            }
+        } catch (Exception ignored) { }
+        hist = h;
         statsView.setText("正在统计相册…");
         new Thread(new Runnable() {
             public void run() {
@@ -278,19 +350,6 @@ public class MainActivity extends Activity {
                 final int t = total;
                 runOnUiThread(new Runnable() {
                     public void run() {
-                        String hist = "";
-                        try {
-                            File hf = Engine.historyFile(MainActivity.this);
-                            if (hf.exists()) {
-                                JSONArray recs = new JSONArray(Engine.readText(hf));
-                                if (recs.length() > 0) {
-                                    JSONObject last = recs.getJSONObject(recs.length() - 1);
-                                    hist = "\n最近一次" + (last.optString("type").equals("backup") ? "备份" : "恢复")
-                                            + "：" + Engine.fmtTime(last.optLong("time"))
-                                            + "（成功 " + last.optInt("added") + "，跳过 " + last.optInt("skipped") + "，失败 " + last.optInt("failed") + "）";
-                                }
-                            }
-                        } catch (Exception ignored) { }
                         statsView.setText("相册共 " + t + " 项 · 已备份 " + backed + " 项（" + Engine.fmtBytes(bb) + "）" + hist);
                     }
                 });

@@ -11,6 +11,7 @@ import android.provider.MediaStore;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -24,7 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** 备份 / 恢复引擎。备份池 = App 专属目录下的 AlbumBackup 文件夹。 */
+/** 备份 / 恢复引擎。存储出口统一走 BackupStore（默认目录或用户自选 SAF 文件夹）。 */
 public class Engine {
 
     public interface Progress {
@@ -36,23 +37,18 @@ public class Engine {
 
     /** 恢复统一落点：不按原路径还原，全部进这个相册，靠拍摄时间排序 */
     public static final String RESTORE_DIR = "Pictures/相册备份恢复";
+    public static final String MANIFEST = "manifest.json";
+    public static final String HISTORY = "history.json";
 
     private final Context ctx;
     private final Progress progress;
+    private final BackupStore store;
 
     public Engine(Context ctx, Progress progress) {
         this.ctx = ctx.getApplicationContext();
         this.progress = progress;
+        this.store = BackupStore.open(this.ctx);
     }
-
-    public static File backupRoot(Context ctx) {
-        File base = ctx.getExternalFilesDir(null);
-        if (base == null) base = ctx.getFilesDir();
-        return new File(base, "AlbumBackup");
-    }
-
-    public static File manifestFile(Context ctx) { return new File(backupRoot(ctx), "manifest.json"); }
-    public static File historyFile(Context ctx) { return new File(backupRoot(ctx), "history.json"); }
 
     // ---------------- 备份 ----------------
 
@@ -63,9 +59,7 @@ public class Engine {
 
     public Result runBackup() throws Exception {
         cancelled = false;
-        File root = backupRoot(ctx);
-        if (!root.exists()) root.mkdirs();
-        Map<String, JSONObject> old = loadManifestMap(root);
+        Map<String, JSONObject> old = loadManifestMap(store);
         List<MediaLib.Item> items = MediaLib.queryAll(ctx);
         Result r = new Result();
         r.total = items.size();
@@ -81,14 +75,14 @@ public class Engine {
                 if (prev != null
                         && prev.optLong("size") == it.size
                         && prev.optLong("modified") == it.dateModified) {
-                    File f = new File(root, prev.optString("stored", key));
-                    if (f.exists() && f.length() == it.size) {
+                    String storedPath = prev.optString("stored", key);
+                    if (store.exists(storedPath) && store.length(storedPath) == it.size) {
                         arr.put(prev);
                         r.skipped++;
                         continue;
                     }
                 }
-                String stored = copyOne(it, root, key);
+                String stored = copyOne(it, key, prev != null);
                 JSONObject o = new JSONObject();
                 o.put("stored", stored);
                 o.put("name", it.name);
@@ -98,7 +92,6 @@ public class Engine {
                 o.put("modified", it.dateModified);
                 o.put("mime", it.mime == null ? "" : it.mime);
                 o.put("video", it.video);
-                // md5 在 copyOne 里算好放 ThreadLocal 不方便，改为存 size 校验，md5 存 copy 时计算
                 o.put("md5", lastMd5);
                 arr.put(o);
                 r.added++;
@@ -111,32 +104,28 @@ public class Engine {
         JSONObject man = new JSONObject();
         man.put("version", 1);
         man.put("items", arr);
-        writeText(new File(root, "manifest.json"), man.toString());
-        appendHistory(root, "backup", r);
+        writeStoreText(MANIFEST, man.toString());
+        appendHistory("backup", r);
         return r;
     }
 
     private String lastMd5 = "";
 
-    private String copyOne(MediaLib.Item it, File root, String key) throws Exception {
-        File dest = new File(root, key);
-        if (dest.exists() && dest.length() > 0 && dest.length() != it.size) {
-            // 同路径同名但大小不同：换名存放，避免覆盖另一份
+    private String copyOne(MediaLib.Item it, String key, boolean hadPrev) throws Exception {
+        String target = key;
+        long existLen = store.length(key);
+        if (hadPrev && existLen >= 0 && existLen != it.size) {
+            // 同路径同名但内容已变：旧的那份保留，新文件换名存，避免覆盖
             int dot = key.lastIndexOf('.');
-            String alt = (dot > 0 ? key.substring(0, dot) : key) + "_" + it.dateModified + (dot > 0 ? key.substring(dot) : "");
-            dest = new File(root, alt);
-            key = alt;
+            target = (dot > 0 ? key.substring(0, dot) : key) + "_" + it.dateModified + (dot > 0 ? key.substring(dot) : "");
         }
-        File parent = dest.getParentFile();
-        if (parent != null && !parent.exists()) parent.mkdirs();
-        File tmp = new File(parent, dest.getName() + ".part");
         InputStream in = null;
         OutputStream out = null;
         MessageDigest md = MessageDigest.getInstance("MD5");
         try {
             in = ctx.getContentResolver().openInputStream(it.uri);
             if (in == null) throw new Exception("无法读取源文件");
-            out = new FileOutputStream(tmp);
+            out = store.create(target);
             byte[] buf = new byte[128 * 1024];
             int n;
             while ((n = in.read(buf)) > 0) {
@@ -144,24 +133,21 @@ public class Engine {
                 md.update(buf, 0, n);
                 if (cancelled) throw new Exception("已取消");
             }
+            out.flush();
         } finally {
             if (in != null) in.close();
             if (out != null) out.close();
         }
-        if (dest.exists()) dest.delete();
-        if (!tmp.renameTo(dest)) throw new Exception("写入备份文件失败");
-        if (it.dateModified > 0) dest.setLastModified(it.dateModified);
         lastMd5 = hex(md.digest());
-        return key;
+        return target;
     }
 
     // ---------------- 恢复 ----------------
 
     public Result runRestore() throws Exception {
         cancelled = false;
-        File root = backupRoot(ctx);
-        Map<String, JSONObject> map = loadManifestMap(root);
-        if (map.isEmpty()) throw new Exception("没有找到备份清单（manifest.json），请先备份，或把备份文件夹拷到本机后重试");
+        Map<String, JSONObject> map = loadManifestMap(store);
+        if (map.isEmpty()) throw new Exception("在备份位置没找到清单（manifest.json），请先备份，或把备份拷到当前备份文件夹后重试");
         Result r = new Result();
         r.total = map.size();
         int done = 0;
@@ -179,9 +165,9 @@ public class Engine {
                     r.skipped++;
                     continue;
                 }
-                File src = new File(root, stored);
-                if (!src.exists()) { r.failed++; progress.onLog("备份文件缺失：" + stored); continue; }
-                restoreOne(src, o);
+                InputStream in = store.open(stored);
+                if (in == null) { r.failed++; progress.onLog("备份文件缺失：" + stored); continue; }
+                try { restoreOne(in, o); } finally { in.close(); }
                 r.added++;
                 r.bytes += size;
             } catch (Exception e) {
@@ -189,16 +175,16 @@ public class Engine {
                 progress.onLog("恢复失败：" + name + "（" + e.getMessage() + "）");
             }
         }
-        appendHistory(root, "restore", r);
+        appendHistory("restore", r);
         return r;
     }
 
-    private void restoreOne(File src, JSONObject o) throws Exception {
+    private void restoreOne(InputStream in, JSONObject o) throws Exception {
         String name = o.optString("name");
-        String rel = o.optString("rel", "");
         String mime = o.optString("mime", "");
         long taken = o.optLong("taken");
         long modified = o.optLong("modified");
+        long size = o.optLong("size");
         boolean video = o.optBoolean("video");
         if (Build.VERSION.SDK_INT >= 29) {
             Uri base = video ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
@@ -213,15 +199,12 @@ public class Engine {
             Uri uri = cr.insert(base, v);
             if (uri == null) throw new Exception("MediaStore 拒绝写入");
             OutputStream out = null;
-            InputStream in = null;
             try {
                 out = cr.openOutputStream(uri);
-                in = new FileInputStream(src);
                 byte[] buf = new byte[128 * 1024];
                 int n;
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             } finally {
-                if (in != null) in.close();
                 if (out != null) out.close();
             }
             ContentValues done = new ContentValues();
@@ -229,23 +212,20 @@ public class Engine {
             cr.update(uri, done, null, null);
         } else {
             File dest = new File(Environment.getExternalStorageDirectory(), RESTORE_DIR + "/" + name);
-            if (dest.exists() && dest.length() != src.length()) {
+            if (dest.exists() && dest.length() != size) {
                 int dot = name.lastIndexOf('.');
                 String alt = (dot > 0 ? name.substring(0, dot) : name) + "_" + modified + (dot > 0 ? name.substring(dot) : "");
                 dest = new File(Environment.getExternalStorageDirectory(), RESTORE_DIR + "/" + alt);
             }
             File parent = dest.getParentFile();
             if (parent != null && !parent.exists()) parent.mkdirs();
-            InputStream in = null;
             OutputStream out = null;
             try {
-                in = new FileInputStream(src);
                 out = new FileOutputStream(dest);
                 byte[] buf = new byte[128 * 1024];
                 int n;
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             } finally {
-                if (in != null) in.close();
                 if (out != null) out.close();
             }
             if (modified > 0) dest.setLastModified(modified);
@@ -255,12 +235,14 @@ public class Engine {
 
     // ---------------- 清单/历史 ----------------
 
-    public static Map<String, JSONObject> loadManifestMap(File root) {
+    public static Map<String, JSONObject> loadManifestMap(BackupStore store) {
         Map<String, JSONObject> map = new HashMap<String, JSONObject>();
         try {
-            File f = new File(root, "manifest.json");
-            if (!f.exists()) return map;
-            JSONObject man = new JSONObject(readText(f));
+            InputStream in = store.open(MANIFEST);
+            if (in == null) return map;
+            String text;
+            try { text = readText(in); } finally { in.close(); }
+            JSONObject man = new JSONObject(text);
             JSONArray arr = man.optJSONArray("items");
             if (arr == null) return map;
             for (int i = 0; i < arr.length(); i++) {
@@ -273,12 +255,28 @@ public class Engine {
         return map;
     }
 
-    private void appendHistory(File root, String type, Result r) {
+    public static Map<String, JSONObject> loadManifestMap(Context ctx) {
+        return loadManifestMap(BackupStore.open(ctx));
+    }
+
+    public static JSONArray readHistory(Context ctx) {
+        try {
+            BackupStore store = BackupStore.open(ctx);
+            InputStream in = store.open(HISTORY);
+            if (in == null) return new JSONArray();
+            try { return new JSONArray(readText(in)); } finally { in.close(); }
+        } catch (Exception e) {
+            return new JSONArray();
+        }
+    }
+
+    private void appendHistory(String type, Result r) {
         try {
             JSONArray recs = new JSONArray();
-            File f = new File(root, "history.json");
-            if (f.exists()) {
-                try { recs = new JSONArray(readText(f)); } catch (Exception ignored) { }
+            InputStream in = store.open(HISTORY);
+            if (in != null) {
+                try { recs = new JSONArray(readText(in)); } catch (Exception ignored) { }
+                in.close();
             }
             JSONObject o = new JSONObject();
             o.put("time", System.currentTimeMillis());
@@ -290,25 +288,21 @@ public class Engine {
             o.put("bytes", r.bytes);
             recs.put(o);
             while (recs.length() > 50) recs.remove(0);
-            writeText(f, recs.toString());
+            writeStoreText(HISTORY, recs.toString());
         } catch (Exception ignored) { }
     }
 
-    public static String readText(File f) throws Exception {
-        FileInputStream in = new FileInputStream(f);
-        try {
-            byte[] buf = new byte[(int) f.length()];
-            int off = 0, n;
-            while (off < buf.length && (n = in.read(buf, off, buf.length - off)) > 0) off += n;
-            return new String(buf, 0, off, "UTF-8");
-        } finally { in.close(); }
+    private void writeStoreText(String rel, String s) throws Exception {
+        OutputStream out = store.create(rel);
+        try { out.write(s.getBytes("UTF-8")); } finally { out.close(); }
     }
 
-    public static void writeText(File f, String s) throws Exception {
-        File parent = f.getParentFile();
-        if (parent != null && !parent.exists()) parent.mkdirs();
-        FileOutputStream out = new FileOutputStream(f);
-        try { out.write(s.getBytes("UTF-8")); } finally { out.close(); }
+    public static String readText(InputStream in) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+        return new String(bos.toByteArray(), "UTF-8");
     }
 
     static String hex(byte[] bs) {

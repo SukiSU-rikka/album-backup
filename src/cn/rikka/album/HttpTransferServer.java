@@ -5,8 +5,6 @@ import android.content.Context;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -14,6 +12,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -73,29 +72,41 @@ public class HttpTransferServer {
             String path = parts.length >= 2 ? parts[1] : "/";
             while ((line = br.readLine()) != null && line.length() > 0) { /* 读完请求头 */ }
             OutputStream out = s.getOutputStream();
-            File root = Engine.backupRoot(ctx);
+            BackupStore store = BackupStore.open(ctx);
             if (path.equals("/") || path.equals("/index.html")) {
-                byte[] html = indexPage(root).getBytes("UTF-8");
+                byte[] html = indexPage(store).getBytes("UTF-8");
                 writeHead(out, 200, "text/html; charset=utf-8", html.length);
                 out.write(html);
             } else if (path.equals("/zip")) {
                 writeHead(out, 200, "application/zip", -1);
                 ZipOutputStream zos = new ZipOutputStream(out);
                 zos.setLevel(0);
-                addToZip(zos, root, root);
+                List<String> files = store.listAll();
+                for (String rel : files) {
+                    InputStream in = store.open(rel);
+                    if (in == null) continue;
+                    ZipEntry e = new ZipEntry(rel);
+                    zos.putNextEntry(e);
+                    copy(in, zos);
+                    in.close();
+                    zos.closeEntry();
+                }
                 zos.finish();
                 zos.flush();
             } else if (path.startsWith("/f/")) {
                 String rel = URLDecoder.decode(path.substring(3), "UTF-8");
-                File f = new File(root, rel);
-                String canonRoot = root.getCanonicalPath();
-                if (!f.getCanonicalPath().startsWith(canonRoot) || !f.isFile()) {
+                InputStream in = null;
+                long len = -1;
+                if (!rel.contains("..")) {
+                    len = store.length(rel);
+                    if (len >= 0) in = store.open(rel);
+                }
+                if (in == null) {
                     byte[] msg = "404".getBytes("UTF-8");
                     writeHead(out, 404, "text/plain", msg.length);
                     out.write(msg);
                 } else {
-                    writeHead(out, 200, "application/octet-stream", f.length());
-                    FileInputStream in = new FileInputStream(f);
+                    writeHead(out, 200, "application/octet-stream", len);
                     copy(in, out);
                     in.close();
                 }
@@ -108,22 +119,6 @@ public class HttpTransferServer {
             s.close();
         } catch (Exception e) {
             try { s.close(); } catch (Exception ignored) { }
-        }
-    }
-
-    private void addToZip(ZipOutputStream zos, File root, File dir) throws Exception {
-        File[] fs = dir.listFiles();
-        if (fs == null) return;
-        for (File f : fs) {
-            if (f.isDirectory()) { addToZip(zos, root, f); continue; }
-            String rel = root.toURI().relativize(f.toURI()).getPath();
-            ZipEntry e = new ZipEntry(rel);
-            e.setTime(f.lastModified());
-            zos.putNextEntry(e);
-            FileInputStream in = new FileInputStream(f);
-            copy(in, zos);
-            in.close();
-            zos.closeEntry();
         }
     }
 
@@ -143,8 +138,8 @@ public class HttpTransferServer {
         out.flush();
     }
 
-    private String indexPage(File root) {
-        Map<String, JSONObject> map = Engine.loadManifestMap(root);
+    private String indexPage(BackupStore store) {
+        Map<String, JSONObject> map = Engine.loadManifestMap(store);
         long totalBytes = 0;
         StringBuilder rows = new StringBuilder();
         for (JSONObject o : map.values()) {
@@ -158,10 +153,10 @@ public class HttpTransferServer {
         return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>相册全备份</title>"
             + "<style>body{font-family:sans-serif;margin:24px}table{border-collapse:collapse}td{padding:4px 10px;border-bottom:1px solid #ddd}"
             + ".big{display:inline-block;background:#0e7c86;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-size:18px}</style></head><body>"
-            + "<h2>相册全备份</h2><p>共 " + map.size() + " 个文件，合计 " + Engine.fmtBytes(totalBytes) + "</p>"
+            + "<h2>相册全备份</h2><p>备份位置：" + esc(store.describe()) + " · 共 " + map.size() + " 个文件，合计 " + Engine.fmtBytes(totalBytes) + "</p>"
             + "<p><a class=\"big\" href=\"/zip\">⬇ 下载全部（ZIP）</a></p>"
             + "<table>" + rows + "</table>"
-            + "<p style=\"color:#888\">提示：把 ZIP 解压后，将 AlbumBackup 文件夹拷回手机（或在 App 里执行恢复），即可恢复到相册的「相册备份恢复」里，拍摄时间保留、顺序不变。</p>"
+            + "<p style=\"color:#888\">提示：把 ZIP 解压后，将里面的内容拷进手机上选定的备份文件夹（或拷回默认备份文件夹），在 App 里执行恢复，即可恢复到相册的「相册备份恢复」里，拍摄时间保留、顺序不变。</p>"
             + "</body></html>";
     }
 
