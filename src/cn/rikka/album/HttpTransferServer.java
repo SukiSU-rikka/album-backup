@@ -161,7 +161,7 @@ public class HttpTransferServer {
             + "<h2>相册全备份</h2><p>共 " + map.size() + " 个文件，合计 " + Engine.fmtBytes(totalBytes) + "</p>"
             + "<p><a class=\"big\" href=\"/zip\">⬇ 下载全部（ZIP）</a></p>"
             + "<table>" + rows + "</table>"
-            + "<p style=\"color:#888\">提示：把 ZIP 解压后，将 AlbumBackup 文件夹拷回手机（或在 App 里执行恢复），即可按原路径和拍摄时间恢复到相册。</p>"
+            + "<p style=\"color:#888\">提示：把 ZIP 解压后，将 AlbumBackup 文件夹拷回手机（或在 App 里执行恢复），即可恢复到相册的「相册备份恢复」里，拍摄时间保留、顺序不变。</p>"
             + "</body></html>";
     }
 

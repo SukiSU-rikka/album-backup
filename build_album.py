@@ -7,7 +7,7 @@ SDK = os.path.expanduser("~/workspace/hikari_build/android-sdk")
 AJAR = os.path.join(SDK, "platforms/android-36/android.jar")
 BT = os.path.join(SDK, "build-tools/36.1.0")
 BUILD = os.path.join(ROOT, "build")
-OUT = os.path.expanduser("~/workspace/your_files/album-backup-v1.0.0.apk")
+OUT = os.path.expanduser("~/workspace/your_files/album-backup-v1.0.1.apk")
 KS = os.path.expanduser("~/workspace/keystore/rikka.p12")
 KS_PASS = "rikka2026"
 
@@ -54,7 +54,7 @@ def main():
          "--out", signed, final_unsigned])
     run([os.path.join(BT, "apksigner"), "verify", "--print-certs", signed])
     r = run([os.path.join(BT, "aapt2"), "dump", "badging", signed])
-    assert "cn.rikka.album" in r.stdout and "versionName='1.0.0'" in r.stdout, "badging 不对"
+    assert "cn.rikka.album" in r.stdout and "versionName='1.0.1'" in r.stdout, "badging 不对"
     # 包内结构自检
     z = zipfile.ZipFile(signed)
     names = z.namelist()
@@ -67,7 +67,7 @@ def main():
     shutil.copy(signed, OUT)
     print("APK ->", OUT, os.path.getsize(OUT), "bytes")
     # 源码包
-    srczip = os.path.expanduser("~/workspace/your_files/album-backup-v1.0.0-src.zip")
+    srczip = os.path.expanduser("~/workspace/your_files/album-backup-v1.0.1-src.zip")
     z = zipfile.ZipFile(srczip, "w", zipfile.ZIP_DEFLATED)
     for base in ("src", "res"):
         for dp, _, fns in os.walk(os.path.join(ROOT, base)):

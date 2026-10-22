@@ -34,6 +34,9 @@ public class Engine {
 
     public volatile boolean cancelled = false;
 
+    /** 恢复统一落点：不按原路径还原，全部进这个相册，靠拍摄时间排序 */
+    public static final String RESTORE_DIR = "Pictures/相册备份恢复";
+
     private final Context ctx;
     private final Progress progress;
 
@@ -172,7 +175,7 @@ public class Engine {
             boolean video = o.optBoolean("video");
             progress.onProgress(done, r.total, name);
             try {
-                if (MediaLib.existsInStore(ctx, rel, name, size, video)) {
+                if (MediaLib.existsInStore(ctx, RESTORE_DIR, name, size, video)) {
                     r.skipped++;
                     continue;
                 }
@@ -202,7 +205,7 @@ public class Engine {
             ContentValues v = new ContentValues();
             v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
             if (mime.length() > 0) v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
-            v.put(MediaStore.MediaColumns.RELATIVE_PATH, rel.length() == 0 ? Environment.DIRECTORY_PICTURES : rel);
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, RESTORE_DIR);
             if (taken > 0) v.put(MediaStore.MediaColumns.DATE_TAKEN, taken);
             if (modified > 0) v.put(MediaStore.MediaColumns.DATE_MODIFIED, modified / 1000L);
             v.put(MediaStore.MediaColumns.IS_PENDING, 1);
@@ -225,7 +228,12 @@ public class Engine {
             done.put(MediaStore.MediaColumns.IS_PENDING, 0);
             cr.update(uri, done, null, null);
         } else {
-            File dest = new File(Environment.getExternalStorageDirectory(), rel.length() == 0 ? name : rel + "/" + name);
+            File dest = new File(Environment.getExternalStorageDirectory(), RESTORE_DIR + "/" + name);
+            if (dest.exists() && dest.length() != src.length()) {
+                int dot = name.lastIndexOf('.');
+                String alt = (dot > 0 ? name.substring(0, dot) : name) + "_" + modified + (dot > 0 ? name.substring(dot) : "");
+                dest = new File(Environment.getExternalStorageDirectory(), RESTORE_DIR + "/" + alt);
+            }
             File parent = dest.getParentFile();
             if (parent != null && !parent.exists()) parent.mkdirs();
             InputStream in = null;
