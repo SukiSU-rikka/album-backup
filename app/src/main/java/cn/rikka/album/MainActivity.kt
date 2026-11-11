@@ -2,232 +2,174 @@ package cn.rikka.album
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
-import android.widget.Button
-import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.Toast
 
+/** 一个页面：视图 + 刷新 */
+interface Page {
+    val view: View
+    fun refresh() {}
+    fun onStatus(s: Status) {}
+}
+
 class MainActivity : Activity() {
+    lateinit var ui: Ui
+    private lateinit var content: FrameLayout
+    private lateinit var tabs: List<Page>
+    private val tabViews = ArrayList<LinearLayout>()
+    private var current = 0
+    /** 叠在上面的子页面（日志、整理文件夹） */
+    private val stack = ArrayList<Page>()
+    private var pickCb: ((Uri) -> Unit)? = null
 
-    private val reqTree = 11
-    private val reqPerm = 12
-
-    private lateinit var prefs: SharedPreferences
-    private lateinit var folderText: TextView
-    private lateinit var layoutGroup: RadioGroup
-    private lateinit var origCheck: CheckBox
-    private lateinit var btnBackup: Button
-    private lateinit var btnRestore: Button
-    private lateinit var btnStop: Button
-    private lateinit var bar: ProgressBar
-    private lateinit var status: TextView
-
-    private var treeUri: Uri? = null
-    private var pending: (() -> Unit)? = null
-
-    private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
+    private val statusListener: (Status) -> Unit = { s ->
+        tabs.forEach { it.onStatus(s) }
+        stack.forEach { it.onStatus(s) }
+        s.note.takeIf { it.isNotEmpty() && it != lastNote && !s.busy }?.let {
+            lastNote = it
+            if (resumed) Toast.makeText(this, it.lines().first(), Toast.LENGTH_SHORT).show()
+            tabs.forEach { p -> p.refresh() }
+        }
+    }
+    private var lastNote = ""
+    private var resumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        treeUri = prefs.getString("tree", null)?.let { Uri.parse(it) }
+        Lg.init(this)
+        ui = Ui(this)
+        lastNote = Bus.status.note
 
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(36), dp(20), dp(24))
+        tabs = listOf(HomePage(this), PendingPage(this), ToolsPage(this), SettingsPage(this))
+        content = FrameLayout(this)
+        val nav = ui.hbox {
+            setBackgroundColor(ui.surface)
+            setPadding(0, ui.dp(6), 0, ui.dp(6))
+            elevation = ui.dp(8).toFloat()
         }
-
-        fun label(text: String, size: Float, bold: Boolean = false, topMargin: Int = 0) =
-            TextView(this).apply {
-                this.text = text
-                textSize = size
-                if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
-                col.addView(this, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, dp(topMargin), 0, 0) })
+        val names = listOf("首页" to R.drawable.ic_tab_home, "待删除" to R.drawable.ic_tab_pending,
+            "工具" to R.drawable.ic_tab_tools, "设置" to R.drawable.ic_tab_settings)
+        names.forEachIndexed { i, (label, icon) ->
+            val t = ui.vbox {
+                gravity = Gravity.CENTER
+                setPadding(0, ui.dp(6), 0, ui.dp(4))
+                val pill = ui.frame {
+                    setPadding(ui.dp(18), ui.dp(4), ui.dp(18), ui.dp(4))
+                    addView(ui.icon(icon, ui.sub, 22))
+                }
+                addView(pill, LinearLayout.LayoutParams(-2, -2))
+                addView(ui.tv(label, 12f, ui.sub) { gravity = Gravity.CENTER; setPadding(0, ui.dp(3), 0, 0) })
+                background = ui.ripple(null, 16)
+                setOnClickListener { show(i) }
             }
-
-        fun button(text: String, onClick: () -> Unit) = Button(this).apply {
-            this.text = text
-            setOnClickListener { onClick() }
-            col.addView(this, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, dp(8), 0, 0) })
+            tabViews.add(t)
+            nav.addView(t, ui.lp(0, weight = 1f))
         }
+        setContentView(ui.vbox {
+            setBackgroundColor(ui.bg)
+            addView(content, ui.lp(h = 0, weight = 1f))
+            addView(nav)
+        })
+        show(0)
 
-        label("相册备份", 28f, true)
-        label("备份照片和视频到你选的文件夹，并记录时间信息，恢复后相册排序和原来一致。", 14f, topMargin = 6)
+        // 申请权限（有 root 时同步服务会自己授权，这里是没 root 时的后备）
+        val need = if (Build.VERSION.SDK_INT >= 33)
+            arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS)
+        else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        val missing = need.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
 
-        label("备份文件夹", 16f, true, 24)
-        folderText = label("", 14f, topMargin = 4)
-        button("选择文件夹") { pickFolder() }
+        if (Prefs(this).syncOn) SyncService.start(this)
+    }
 
-        label("备份后的整理方式", 16f, true, 20)
-        layoutGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            listOf(1 to "按日期（年/月）", 2 to "按来源（相机、截图、微信…）", 3 to "全部平铺在一个文件夹").forEach { (id, t) ->
-                addView(RadioButton(context).apply { this.id = id; text = t })
-            }
-            check(prefs.getInt("layout", 1))
-            setOnCheckedChangeListener { _, checked -> prefs.edit().putInt("layout", checked).apply() }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        tabs.forEach { it.refresh() }
+        if (Prefs(this).syncOn) SyncService.start(this)
+    }
+
+    fun show(i: Int) {
+        while (stack.isNotEmpty()) pop()
+        current = i
+        content.removeAllViews()
+        content.addView(tabs[i].view)
+        tabs[i].refresh()
+        tabViews.forEachIndexed { idx, t ->
+            val on = idx == i
+            val pill = t.getChildAt(0) as FrameLayout
+            pill.background = if (on) ui.round(ui.accentSoft, 16) else null
+            (pill.getChildAt(0) as android.widget.ImageView).imageTintList = ColorStateList.valueOf(if (on) ui.accent else ui.sub)
+            (t.getChildAt(1) as android.widget.TextView).setTextColor(if (on) ui.text else ui.sub)
         }
-        col.addView(layoutGroup)
+    }
 
-        btnBackup = button("开始备份") { start("backup") }
-        btnRestore = button("恢复到手机") { confirmRestore() }
-        origCheck = CheckBox(this).apply {
-            text = "恢复时按原来的文件夹放回（会重新变乱，一般不用勾）"
-            textSize = 13f
+    fun push(p: Page) {
+        stack.add(p)
+        content.addView(p.view)
+        p.refresh()
+        p.onStatus(Bus.status)
+    }
+
+    private fun pop() {
+        val p = stack.removeAt(stack.size - 1)
+        content.removeView(p.view)
+    }
+
+    fun back() {
+        if (stack.isNotEmpty()) { pop(); tabs[current].refresh() }
+    }
+
+    @Deprecated("framework Activity")
+    override fun onBackPressed() {
+        when {
+            stack.isNotEmpty() -> back()
+            current != 0 -> show(0)
+            else -> @Suppress("DEPRECATION") super.onBackPressed()
         }
-        col.addView(origCheck)
-        btnStop = button("停止") { Bus.cancel = true }
+    }
 
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            col.addView(this, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, dp(16), 0, 0) })
+    /** 打开系统文件夹选择器（选 U 盘或文件夹） */
+    fun pickFolder(cb: (Uri) -> Unit) {
+        pickCb = cb
+        try {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 7)
+        } catch (t: Throwable) {
+            Toast.makeText(this, "打不开文件夹选择器", Toast.LENGTH_SHORT).show()
         }
-        status = label("", 14f, topMargin = 8)
+    }
 
-        setContentView(ScrollView(this).apply { addView(col) })
+    @Deprecated("framework Activity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
+        val uri = data?.data
+        if (requestCode == 7 && resultCode == RESULT_OK && uri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (_: Throwable) { }
+            pickCb?.invoke(uri)
+        }
+        pickCb = null
     }
 
     override fun onResume() {
         super.onResume()
-        Bus.listener = { runOnUiThread { render() } }
-        render()
+        resumed = true
+        Bus.listen(statusListener)
+        tabs[current].refresh()
     }
 
     override fun onPause() {
-        Bus.listener = null
+        resumed = false
+        Bus.unlisten(statusListener)
         super.onPause()
-    }
-
-    private fun render() {
-        val s = Bus.snapshot
-        val run = Bus.running
-        folderText.text = treeUri?.let { Uri.decode(it.lastPathSegment ?: it.toString()) } ?: "还没选择"
-        btnBackup.isEnabled = !run
-        btnRestore.isEnabled = !run
-        btnStop.visibility = if (run) View.VISIBLE else View.GONE
-        bar.visibility = if (run) View.VISIBLE else View.GONE
-        if (run) {
-            bar.progress = if (s.bytesTotal > 0) (s.bytesDone * 1000 / s.bytesTotal).toInt().coerceIn(0, 1000) else 0
-            status.text = "${s.mode}中  ${s.done}/${s.total}\n新增 ${s.copied} · 跳过 ${s.skipped} · 失败 ${s.failed}\n${s.current}"
-        } else {
-            status.text = s.message.ifEmpty { "选好文件夹后，点“开始备份”。" }
-        }
-    }
-
-    private fun pickFolder() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
-        )
-        @Suppress("DEPRECATION")
-        startActivityForResult(i, reqTree)
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == reqTree && resultCode == RESULT_OK) {
-            val u = data?.data ?: return
-            contentResolver.takePersistableUriPermission(
-                u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-            treeUri = u
-            prefs.edit().putString("tree", u.toString()).apply()
-            render()
-        }
-    }
-
-    private fun hasRead(): Boolean =
-        if (Build.VERSION.SDK_INT >= 33)
-            checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
-                checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-        else
-            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-
-    private fun ensurePerms(then: () -> Unit) {
-        val need = ArrayList<String>()
-        if (Build.VERSION.SDK_INT >= 33) {
-            need.add(Manifest.permission.READ_MEDIA_IMAGES)
-            need.add(Manifest.permission.READ_MEDIA_VIDEO)
-            need.add(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            need.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-        need.add(Manifest.permission.ACCESS_MEDIA_LOCATION)
-        val missing = need.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isEmpty()) {
-            then()
-        } else {
-            pending = then
-            requestPermissions(missing.toTypedArray(), reqPerm)
-        }
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != reqPerm) return
-        val action = pending
-        pending = null
-        if (!hasRead()) {
-            Toast.makeText(this, "需要允许访问“全部照片和视频”才能备份", Toast.LENGTH_LONG).show()
-            return
-        }
-        action?.invoke()
-    }
-
-    private fun start(mode: String) {
-        val t = treeUri
-        if (t == null) {
-            Toast.makeText(this, "请先选择文件夹", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (Bus.running) return
-        ensurePerms { launch(mode, t) }
-    }
-
-    private fun confirmRestore() {
-        if (treeUri == null) {
-            Toast.makeText(this, "请先选择备份文件夹", Toast.LENGTH_SHORT).show()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("恢复到手机")
-            .setMessage("会把备份里手机上没有的照片和视频放回系统相册，并还原拍摄时间。手机上已有的会自动跳过。继续吗？")
-            .setPositiveButton("开始恢复") { _, _ -> start("restore") }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun launch(mode: String, tree: Uri) {
-        val layout = when (layoutGroup.checkedRadioButtonId) {
-            2 -> "SOURCE"
-            3 -> "FLAT"
-            else -> "DATE"
-        }
-        val i = Intent(this, WorkService::class.java)
-            .putExtra("mode", mode)
-            .putExtra("tree", tree.toString())
-            .putExtra("layout", layout)
-            .putExtra("orig", origCheck.isChecked)
-        startForegroundService(i)
     }
 }
