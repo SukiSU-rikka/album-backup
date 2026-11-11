@@ -179,6 +179,26 @@ class SyncEngine(private val ctx: Context, private val cancelled: () -> Boolean)
     }
 
     companion object {
+        /** 待删除列表里点「全部删除」：只删仍在倒计时的，期间被放回的不动 */
+        fun purgeAll(ctx: Context, ids: List<Long>): String {
+            val db = Db.get(ctx)
+            var n = 0; var bytes = 0L
+            for ((i, id) in ids.withIndex()) {
+                if (Worker.cancel) break
+                Bus.update { it.copy(busy = true, task = "删除", detail = "", done = i, total = ids.size) }
+                val it = db.byId(id) ?: continue
+                if (it.state != Item.PENDING) continue
+                db.deleteItem(id)
+                if (db.refs(it.sha) == 0) {
+                    db.blob(it.sha)?.let { b -> if (b.onPhone) { Store.remove(b.rel); bytes += b.size }; db.deleteBlob(b.sha) }
+                }
+                n++
+            }
+            Store.saveManifest(ctx, db)
+            Lg.i("手动全部删除待删除备份：$n 个，释放 ${Fmt.size(bytes)}")
+            return "已删除 $n 个，释放 ${Fmt.size(bytes)}"
+        }
+
         /** 待删除列表里点「立即删除」 */
         fun purge(ctx: Context, id: Long) {
             val db = Db.get(ctx)

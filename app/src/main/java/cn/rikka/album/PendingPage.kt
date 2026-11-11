@@ -15,6 +15,7 @@ class PendingPage(private val a: MainActivity) : Page {
     private var items: List<Item> = emptyList()
     private lateinit var sub: TextView
     private lateinit var allBtn: TextView
+    private lateinit var delBtn: TextView
     private lateinit var empty: TextView
     private val list = ListView(a)
 
@@ -87,6 +88,13 @@ class PendingPage(private val a: MainActivity) : Page {
                 ui.confirm("全部放回", "把 ${items.size} 个文件放回相册原来的位置，时间和删除前一样。") { restore(items) }
             }
             addView(allBtn, ui.lp(-2, t = 14))
+            delBtn = ui.chip("全部删除", ui.warn, ui.warnSoft) {
+                ui.confirm("全部删除", "待删除里的 ${items.size} 个文件的备份会马上删掉，不再等倒计时，删了就不能放回相册。", "全部删除") {
+                    val ids = items.map { it.id }
+                    Worker.job(a, "删除") { SyncEngine.purgeAll(a, ids) }
+                }
+            }
+            addView(delBtn, ui.lp(-2, l = 8, t = 14))
         })
         sub = ui.subtitle("")
         addView(sub)
@@ -119,10 +127,11 @@ class PendingPage(private val a: MainActivity) : Page {
     override fun refresh() {
         items = Db.get(a).pending()
         val keep = Prefs(a).keepDays
-        sub.text = "相册里删掉的照片视频，备份会保留 $keep 天后自动删除。点「放回」恢复到原来的位置，长按可立即删除。"
+        sub.text = "相册里删掉的照片视频，备份会保留 $keep 天后自动删除。点「放回」恢复到原来的位置，长按单个可立即删除，「全部删除」一次清空。"
         empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
         list.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
         allBtn.visibility = if (items.size > 1) View.VISIBLE else View.GONE
+        delBtn.visibility = if (items.isNotEmpty()) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
     }
 }
