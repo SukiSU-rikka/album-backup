@@ -115,14 +115,17 @@ class OrganizePage(private val a: MainActivity) : Page {
             })
             addView(ui.tv("整理相册文件夹", 20f, ui.text, true) { setPadding(ui.dp(8), 0, 0, 0) })
         })
-        addView(ui.tv("点右边的类别可以修改归到哪。选「不动」的文件夹不会被碰。没备份的文件会先跳过，等备份完再整理。", 13f, ui.sub) {
+        addView(ui.tv("点右边的类别可以修改归到哪，选「不动」的文件夹不会被碰；嫌麻烦就点「一键全部整理」。没备份的文件会先跳过，等备份完再整理。", 13f, ui.sub) {
             setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(8))
         })
         addView(ScrollView(a).apply {
             addView(listBox.apply { setPadding(ui.dp(16), ui.dp(4), ui.dp(16), ui.dp(16)) })
         }, ui.lp(h = 0, weight = 1f))
-        go = ui.primary("开始整理") { start() }
-        addView(go, ui.lp(l = 16, r = 16, t = 4, b = 16))
+        go = ui.primary("整理选中的") { start() }
+        addView(ui.hbox {
+            addView(ui.secondary("一键全部整理") { startAll() }, ui.lp(0, weight = 1f, r = 6))
+            addView(go, ui.lp(0, weight = 1f, l = 6))
+        }, ui.lp(l = 16, r = 16, t = 4, b = 16))
     }
 
     override fun refresh() {
@@ -181,21 +184,38 @@ class OrganizePage(private val a: MainActivity) : Page {
 
     private fun updateGo() {
         val n = folders.count { !it.clean && it.cat != Organizer.Cat.KEEP }
-        go.text = if (n > 0) "开始整理（$n 个文件夹）" else "开始整理"
+        go.text = if (n > 0) "整理选中的（$n）" else "整理选中的"
         go.alpha = if (n > 0) 1f else 0.4f
+    }
+
+    /** 一键全部整理：所有需要整理的文件夹都归类，认不出来源的归到「其他」 */
+    private fun startAll() {
+        val messy = folders.filter { !it.clean }
+        if (messy.isEmpty()) { ui.info("一键全部整理", "相册文件夹都很干净，没有需要整理的。"); return }
+        val unknown = messy.count { it.cat == Organizer.Cat.KEEP }
+        val files = messy.sumOf { it.count }
+        val msg = "把 ${messy.size} 个文件夹里的 $files 个照片视频全部归位。" +
+            (if (unknown > 0) "其中 $unknown 个认不出来源的文件夹会归到「${targets[Organizer.Cat.OTHER]?.trimEnd('/')}」。" else "") +
+            "\n\n会先跑一次同步，确保都备份好了；没备份成功的文件不会被移动。"
+        ui.confirm("一键全部整理", msg, "全部整理") {
+            val plan = messy.associate { it.rel to (if (it.cat == Organizer.Cat.KEEP) Organizer.Cat.OTHER else it.cat) }
+            run(plan)
+        }
+    }
+
+    private fun run(plan: Map<String, Organizer.Cat>) {
+        Worker.job(a, "整理") {
+            try { SyncEngine(a) { Worker.cancel }.run() } catch (h: Halt) { throw h } catch (t: Throwable) { Lg.e("整理前同步出错", t) }
+            Organizer.tidy(a, plan) { Worker.cancel }.toString()
+        }
+        a.back()
     }
 
     private fun start() {
         val plan = folders.filter { !it.clean && it.cat != Organizer.Cat.KEEP }.associate { it.rel to it.cat }
         if (plan.isEmpty()) return
         val files = folders.filter { it.rel in plan }.sumOf { it.count }
-        ui.confirm("开始整理", "移动 ${plan.size} 个文件夹里的 $files 个照片视频。会先跑一次同步，确保都备份好了。", "开始") {
-            Worker.job(a, "整理") {
-                try { SyncEngine(a) { Worker.cancel }.run() } catch (h: Halt) { throw h } catch (t: Throwable) { Lg.e("整理前同步出错", t) }
-                Organizer.tidy(a, plan) { Worker.cancel }.toString()
-            }
-            a.back()
-        }
+        ui.confirm("开始整理", "移动 ${plan.size} 个文件夹里的 $files 个照片视频。会先跑一次同步，确保都备份好了。", "开始") { run(plan) }
     }
 }
 
