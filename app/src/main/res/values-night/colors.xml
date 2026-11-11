@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 深色配色 -->
+<resources>
+    <color name="bg">#14110E</color>
+    <color name="surface">#201C17</color>
+    <color name="surface2">#2A251F</color>
+    <color name="line">#352F27</color>
+    <color name="text">#EFE7DB</color>
+    <color name="sub">#A79A89</color>
+    <color name="accent">#F0AE4A</color>
+    <color name="accent_soft">#3B2F1E</color>
+    <color name="on_accent">#1E1710</color>
+    <color name="film">#0A0907</color>
+    <color name="film_hole">#201C17</color>
+    <color name="film_text">#E9C68E</color>
+    <color name="ok">#7CBF8C</color>
+    <color name="warn">#F08A5A</color>
+    <color name="warn_soft">#3D2419</color>
+</resources>

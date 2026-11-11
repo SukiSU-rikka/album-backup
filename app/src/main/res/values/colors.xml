@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 浅色配色：暖白底 + 琥珀色强调（和图标里代表备份的那张照片同色） -->
+<resources>
+    <color name="bg">#F6F2EB</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface2">#EFE8DD</color>
+    <color name="line">#E3DACC</color>
+    <color name="text">#221D17</color>
+    <color name="sub">#76695A</color>
+    <color name="accent">#D9861A</color>
+    <color name="accent_soft">#FBEACB</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="film">#26211C</color>
+    <color name="film_hole">#F6F2EB</color>
+    <color name="film_text">#E9C68E</color>
+    <color name="ok">#3D7A4C</color>
+    <color name="warn">#C0561C</color>
+    <color name="warn_soft">#FBE3D6</color>
+</resources>
